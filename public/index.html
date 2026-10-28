@@ -1,0 +1,84 @@
+
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Canteen Pre-Order</title>
+<link rel="stylesheet" href="style.css"></head><body>
+<div id="authBox" class="auth panel">
+  <h1>🍽️ Canteen Pre-Order</h1><p class="mut">Sign in to order ahead and skip the queue.</p>
+  <input id="em" type="email" placeholder="College email"><input id="pw" type="password" placeholder="Password (min 6)">
+  <button class="btn" id="login">Sign in</button>
+  <button class="btn" id="signup" style="background:var(--bg);color:var(--tx);border:1px solid var(--bd)">Create account</button>
+  <button class="btn" id="google" style="background:var(--bg);color:var(--tx);border:1px solid var(--bd)">Continue with Google</button>
+  <div class="err" id="err"></div>
+</div>
+<div id="app" class="hide">
+<header><h1>🍽️ Canteen Pre-Order</h1><span><span class="mut" id="who"></span> <button class="sm" id="out">Sign out</button></span></header>
+<main>
+  <h3>Menu</h3><div class="grid" id="menu"></div>
+  <div class="panel" style="margin-top:14px">
+    <div id="cart" class="mut">Your cart is empty.</div>
+    <select id="slot"></select>
+    <button class="btn" id="go" disabled>Place Order</button><div class="mut" id="msg"></div>
+  </div>
+  <h3>My orders</h3><div id="mine"></div>
+</main></div>
+<script type="module">
+
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getAuth,onAuthStateChanged,signInWithEmailAndPassword,createUserWithEmailAndPassword,GoogleAuthProvider,signInWithPopup,signOut}
+ from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {getFirestore,collection,doc,addDoc,onSnapshot,query,where,serverTimestamp}
+ from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {firebaseConfig} from "./firebase-config.js";
+
+const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getFirestore(app);
+const $=i=>document.getElementById(i);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let user=null,menu=[],cart={},unsubs=[];
+
+const fail=e=>$("err").textContent=(e.code||e.message||"Error").replace("auth/","").replace(/-/g," ");
+$("login").onclick=()=>signInWithEmailAndPassword(auth,$("em").value,$("pw").value).catch(fail);
+$("signup").onclick=()=>createUserWithEmailAndPassword(auth,$("em").value,$("pw").value).catch(fail);
+$("google").onclick=()=>signInWithPopup(auth,new GoogleAuthProvider()).catch(fail);
+$("out").onclick=()=>signOut(auth);
+
+// pickup slots: next 6 quarter-hours
+(function(){const s=$("slot");let t=new Date();t.setMinutes(Math.ceil((t.getMinutes()+10)/15)*15,0,0);
+ s.innerHTML='<option value="ASAP">Pickup: As soon as ready</option>';
+ for(let i=0;i<6;i++){const l=t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+  s.innerHTML+=`<option>${l}</option>`;t=new Date(t.getTime()+15*60000)}})();
+
+onAuthStateChanged(auth,u=>{
+ user=u;unsubs.forEach(f=>f());unsubs=[];
+ $("authBox").classList.toggle("hide",!!u);$("app").classList.toggle("hide",!u);
+ if(!u)return;
+ $("who").textContent=u.email;
+ unsubs.push(onSnapshot(collection(db,"menu"),s=>{
+  menu=s.docs.map(d=>({id:d.id,...d.data()}));drawMenu();drawCart()}));
+ unsubs.push(onSnapshot(query(collection(db,"orders"),where("uid","==",u.uid)),s=>{
+  const o=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.ts?.seconds||0)-(a.ts?.seconds||0));drawMine(o)}));
+});
+
+function drawMenu(){
+ $("menu").innerHTML=menu.length?menu.map(m=>`<div class="item ${m.available?"":"off"}"><div class="e">${esc(m.emoji||"🍴")}</div>
+ <b>${esc(m.name)}</b><div class="mut">₹${m.price}${m.available?"":" · Sold out"}</div>
+ ${m.available?`<div class="q"><button data-d="-1" data-i="${m.id}">−</button><b>${cart[m.id]||0}</b><button data-d="1" data-i="${m.id}">+</button></div>`:""}</div>`).join("")
+ :'<div class="mut">Menu is empty. Admin must add items.</div>';
+}
+$("menu").onclick=e=>{const b=e.target.closest("button");if(!b)return;
+ const i=b.dataset.i,v=Math.max(0,(cart[i]||0)+ +b.dataset.d);v?cart[i]=v:delete cart[i];drawMenu();drawCart()};
+const lines=()=>menu.filter(m=>cart[m.id]&&m.available).map(m=>({name:m.name,qty:cart[m.id],price:m.price}));
+function drawCart(){const L=lines(),t=L.reduce((s,x)=>s+x.qty*x.price,0);
+ $("cart").innerHTML=L.length?L.map(x=>`<div class="row"><span>${x.qty} × ${esc(x.name)}</span><span>₹${x.qty*x.price}</span></div>`).join("")+`<div class="row"><b>Total</b><b>₹${t}</b></div>`:"Your cart is empty.";
+ $("go").disabled=!L.length}
+$("go").onclick=async()=>{const L=lines();if(!L.length)return;$("go").disabled=true;
+ try{const token=String(Math.floor(100+Math.random()*900));
+  await addDoc(collection(db,"orders"),{uid:user.uid,email:user.email,token,items:L,
+   total:L.reduce((s,x)=>s+x.qty*x.price,0),pickup:$("slot").value,status:"placed",ts:serverTimestamp()});
+  cart={};drawMenu();drawCart();$("msg").textContent="Order placed! Token #"+token;
+ }catch(e){$("msg").textContent="Failed: "+e.code;$("go").disabled=false}};
+const LBL={placed:"Received",preparing:"Preparing",ready:"Ready – collect now!",collected:"Collected"};
+function drawMine(o){$("mine").innerHTML=o.length?o.map(x=>`<div class="ord"><div class="row"><span class="tok">#${x.token}</span>
+ <span class="tag ${x.status}">${LBL[x.status]}</span></div><ul>${x.items.map(i=>`<li>${i.qty} × ${esc(i.name)}</li>`).join("")}</ul>
+ <div class="mut">₹${x.total} · Pickup: ${esc(x.pickup)}</div></div>`).join(""):'<div class="mut">No orders yet.</div>';
+ if(o.some(x=>x.status==="ready")&&document.title[0]!=="✅"){document.title="✅ Order ready!"}}
+</script></body></html>

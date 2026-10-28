@@ -1,0 +1,319 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Canteen Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="authBox" class="auth panel">
+  <h1>👨‍🍳 Canteen Dashboard</h1>
+  <input id="em" type="email" placeholder="Staff email">
+  <input id="pw" type="password" placeholder="Password">
+  <button class="btn" id="login">Sign in</button>
+  <div class="err" id="err"></div>
+</div>
+
+<div id="app" class="hide">
+  <header>
+    <h1>👨‍🍳 Canteen Dashboard</h1>
+    <span>
+      <span class="mut" id="who"></span>
+      <button class="sm" id="out">Sign out</button>
+    </span>
+  </header>
+
+  <main>
+    <div class="stats">
+      <div class="card"><b id="s1">0</b><span class="mut">Active orders</span></div>
+      <div class="card"><b id="s2">0</b><span class="mut">Orders today</span></div>
+      <div class="card"><b id="s3">₹0</b><span class="mut">Revenue today</span></div>
+    </div>
+
+    <div class="board">
+      <div><h3>🆕 New</h3><div id="c1"></div></div>
+      <div><h3>👨‍🍳 Preparing</h3><div id="c2"></div></div>
+      <div><h3>✅ Ready</h3><div id="c3"></div></div>
+    </div>
+
+    <h3>Manage menu</h3>
+    <div class="panel">
+      <div class="row">
+        <input id="mn" placeholder="Item name">
+        <input id="mp" type="number" min="1" placeholder="₹" style="max-width:90px">
+        <input id="me" placeholder="🍕" style="max-width:70px">
+      </div>
+      <button class="btn" id="add">Add item</button>
+      <button class="sm" id="seed" style="margin-top:8px">Load sample menu</button>
+      <div class="err" id="menuErr"></div>
+    </div>
+
+    <div class="grid" id="menu" style="margin-top:10px"></div>
+  </main>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore,
+  collection,
+  doc,
+  addDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { firebaseConfig, ADMIN_EMAILS } from "./firebase-config.js";
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const $ = id => document.getElementById(id);
+
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;"
+}[c]));
+
+let unsubs = [];
+let orders = [];
+
+$("login").onclick = async () => {
+  $("err").textContent = "";
+  try {
+    await signInWithEmailAndPassword(
+      auth,
+      $("em").value.trim(),
+      $("pw").value
+    );
+  } catch (e) {
+    $("err").textContent = e.code || e.message || "Login failed";
+  }
+};
+
+$("out").onclick = () => signOut(auth);
+
+onAuthStateChanged(auth, u => {
+  unsubs.forEach(f => f());
+  unsubs = [];
+
+  const ok = !!u && ADMIN_EMAILS.includes(u.email);
+
+  if (u && !ok) {
+    $("err").textContent = "Not an admin account";
+    signOut(auth);
+    return;
+  }
+
+  $("authBox").classList.toggle("hide", ok);
+  $("app").classList.toggle("hide", !ok);
+
+  if (!ok) return;
+
+  $("who").textContent = u.email;
+
+  unsubs.push(onSnapshot(
+    collection(db, "orders"),
+    s => {
+      orders = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      draw();
+    },
+    showError
+  ));
+
+  unsubs.push(onSnapshot(
+    collection(db, "menu"),
+    s => drawMenu(s.docs.map(d => ({ id: d.id, ...d.data() }))),
+    showError
+  ));
+});
+
+function showError(e) {
+  $("menuErr").textContent = e.message || e.code || "Something went wrong";
+}
+
+const NEXT = {
+  placed: ["preparing", "Start preparing"],
+  preparing: ["ready", "Mark ready"],
+  ready: ["collected", "Handed over"]
+};
+
+const card = o => {
+  const n = NEXT[o.status];
+
+  if (!n) return "";
+
+  const items = Array.isArray(o.items) ? o.items : [];
+
+  return `<div class="ord">
+    <div class="row">
+      <span class="tok">#${esc(o.token)}</span>
+      <span class="mut">${esc(o.email)}</span>
+    </div>
+    <ul>${items.map(i =>
+      `<li>${esc(i.qty)} × ${esc(i.name)}</li>`
+    ).join("")}</ul>
+    <div class="row">
+      <span><b>₹${esc(o.total)}</b>
+      <span class="mut"> · ${esc(o.pickup)}</span></span>
+      <button class="sm p" data-id="${esc(o.id)}" data-s="${n[0]}">
+        ${n[1]}
+      </button>
+    </div>
+  </div>`;
+};
+
+function draw() {
+  const by = s => orders
+    .filter(o => o.status === s)
+    .sort((a, b) => (a.ts?.seconds || 0) - (b.ts?.seconds || 0));
+
+  [["c1", "placed"], ["c2", "preparing"], ["c3", "ready"]]
+    .forEach(([id, status]) => {
+      const list = by(status);
+      $(id).innerHTML = list.length
+        ? list.map(card).join("")
+        : '<div class="mut">None</div>';
+    });
+
+  const d0 = new Date();
+  d0.setHours(0, 0, 0, 0);
+
+  const today = orders.filter(
+    o => (o.ts?.seconds || 0) * 1000 >= d0.getTime()
+  );
+
+  $("s1").textContent =
+    orders.filter(o => o.status !== "collected").length;
+
+  $("s2").textContent = today.length;
+
+  $("s3").textContent = "₹" +
+    today.reduce((sum, o) => sum + (Number(o.total) || 0), 0);
+}
+
+document.addEventListener("click", async e => {
+  const b = e.target.closest("button[data-id]");
+  if (!b) return;
+
+  b.disabled = true;
+
+  try {
+    await updateDoc(doc(db, "orders", b.dataset.id), {
+      status: b.dataset.s
+    });
+    $("menuErr").textContent = "";
+  } catch (err) {
+    showError(err);
+    b.disabled = false;
+  }
+});
+
+function drawMenu(m) {
+  $("menu").innerHTML = m.map(x => `
+    <div class="item ${x.available ? "" : "off"}">
+      <div class="e">${esc(x.emoji || "🍴")}</div>
+      <b>${esc(x.name)}</b>
+      <div class="mut">₹${esc(x.price)}</div>
+      <div class="row">
+        <button class="sm" data-t="${esc(x.id)}" data-a="${x.available}">
+          ${x.available ? "Mark sold out" : "Make available"}
+        </button>
+        <button class="sm" data-x="${esc(x.id)}">🗑</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+$("menu").onclick = async e => {
+  const t = e.target.closest("[data-t]");
+  const x = e.target.closest("[data-x]");
+
+  try {
+    if (t) {
+      await updateDoc(doc(db, "menu", t.dataset.t), {
+        available: t.dataset.a !== "true"
+      });
+    }
+
+    if (x) {
+      await deleteDoc(doc(db, "menu", x.dataset.x));
+    }
+
+    $("menuErr").textContent = "";
+  } catch (err) {
+    showError(err);
+  }
+};
+
+$("add").onclick = async () => {
+  const name = $("mn").value.trim();
+  const price = Number($("mp").value);
+  const emoji = $("me").value.trim() || "🍴";
+
+  if (!name || !Number.isFinite(price) || price <= 0) {
+    $("menuErr").textContent = "Enter a valid item name and price.";
+    return;
+  }
+
+  try {
+    await addDoc(collection(db, "menu"), {
+      name,
+      price,
+      emoji,
+      available: true
+    });
+
+    $("mn").value = "";
+    $("mp").value = "";
+    $("me").value = "";
+    $("menuErr").textContent = "";
+  } catch (err) {
+    showError(err);
+  }
+};
+
+$("seed").onclick = async () => {
+  const samples = [
+    ["Samosa (2)", 20, "🥟"],
+    ["Vada Pav", 25, "🍔"],
+    ["Masala Dosa", 60, "🥞"],
+    ["Idli (3)", 40, "🍚"],
+    ["Veg Meals", 80, "🍱"],
+    ["Tea", 10, "☕"],
+    ["Coffee", 15, "☕"]
+  ];
+
+  $("seed").disabled = true;
+
+  try {
+    for (const [name, price, emoji] of samples) {
+      await addDoc(collection(db, "menu"), {
+        name,
+        price,
+        emoji,
+        available: true
+      });
+    }
+
+    $("menuErr").textContent = "Sample menu added.";
+  } catch (err) {
+    showError(err);
+  } finally {
+    $("seed").disabled = false;
+  }
+};
+</script>
+</body>
+</html>
